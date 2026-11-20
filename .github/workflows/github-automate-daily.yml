@@ -1,0 +1,72 @@
+# Github Automate v2-random | 09:17 UTC | daily
+name: Github Automate daily check-in
+on:
+  schedule:
+    - cron: '17 2 * * *'
+    - cron: '37 8 * * *'
+    - cron: '23 14 * * *'
+    - cron: '47 20 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: github-automate-daily
+  cancel-in-progress: false
+jobs:
+  check-in:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Record today's check-in
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          SLOT: ${{ github.event.schedule }}
+        shell: python
+        run: |
+          import base64
+          import datetime
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          day = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+          repo = os.environ["GITHUB_REPOSITORY"]
+          if os.environ["EVENT"] == "schedule":
+              import hashlib
+              seed = hashlib.sha256(f"{repo.lower()}|{day}".encode()).digest()[0]
+              # Alternate pairs each UTC day so adjacent days always have different times.
+              parity = datetime.date.fromisoformat(day).toordinal() % 2
+              slots = ["17 2 * * *","37 8 * * *","23 14 * * *","47 20 * * *"]
+              if os.environ["SLOT"] != slots[parity + 2 * (seed % 2)]:
+                  print("Today uses another time slot.")
+                  raise SystemExit(0)
+
+          url = f"https://api.github.com/repos/{repo}/contents/.github-automate/check-ins/{day}.md"
+          headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                     "Accept": "application/vnd.github+json", "Content-Type": "application/json"}
+          def exists():
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url, headers=headers)) as response:
+                      return response.status == 200
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return False
+                  raise
+
+          if exists():
+              print("Check-in already exists for", day)
+          else:
+              content = f"# Daily check-in | {day} UTC\n\nScheduled repository check-in for {repo}.\n"
+              payload = {"message": f"Record daily check-in for {day}",
+                         "content": base64.b64encode(content.encode()).decode()}
+              request = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                               method="PUT", headers=headers)
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      print("Created check-in for", day)
+              except urllib.error.HTTPError as error:
+                  if error.code not in (409, 422) or not exists():
+                      raise
