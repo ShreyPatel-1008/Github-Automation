@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Github Automate</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f4f6f4;color:#182b26;font:16px/1.5 Inter,system-ui,sans-serif}header{background:#173e35;color:white;padding:18px max(5vw,20px);display:flex;justify-content:space-between;align-items:center}header strong{font-size:20px}header span{color:#d0e5da}main{max-width:1000px;margin:48px auto;padding:0 20px}h1{font-size:clamp(2.3rem,6vw,4rem);letter-spacing:-.06em;line-height:1.05;margin:12px 0 24px}h2{font-size:1.25rem;margin:0 0 14px}section{background:white;border:1px solid #d6dfda;border-radius:16px;padding:24px;margin:18px 0}.schedule{background:#193f36;color:white}.hours{display:flex;gap:10px;flex-wrap:wrap}.hour{background:#ccf29a;color:#163827;padding:8px 15px;border-radius:8px;font:600 1.35rem ui-monospace,monospace}a{color:#146549;text-underline-offset:3px;overflow-wrap:anywhere}button{border:1px solid #b9c9c0;border-radius:7px;padding:8px 16px;background:white;color:#173e35;font:inherit;cursor:pointer}button:disabled{opacity:.6}.row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}#prs p{border-top:1px solid #dfebe3;padding-top:12px}#repo{overflow-wrap:anywhere}small{color:#53695f}p{margin:9px 0}
+</style>
+<header><strong>Github Automate</strong><span>Asia/Kolkata</span></header><main>
+<div id="date"></div><h1>Automation overview</h1>
+<section class="schedule"><h2>Selected hours · IST</h2><div class="hours" id="hours"></div></section>
+<section><h2>Active repository</h2><div id="repo">Loading rotation…</div></section>
+<section><div class="row"><h2>Today’s pull requests</h2><button id="refresh">Refresh</button></div><div id="prs" aria-live="polite"></div></section>
+<small id="stamp"></small></main>
+<script>
+
+function dailyHours(day) {
+  let seed = Number(day.replaceAll('-', ''));
+  function draw(limit) {
+    seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+    return Math.floor(seed / 4294967296 * limit);
+  }
+  for (let i = 0; i < 5; i++) draw(1);
+  const pool = Array.from({length: 13}, (_, i) => i + 9);
+  const count = 1 + draw(6);
+  return Array.from({length: count}, () => pool.splice(draw(pool.length), 1)[0]).sort((a,b) => a-b);
+}
+function target(config, day) {
+  const matches = config.periods.filter(p => p.start <= day && day <= p.end);
+  if (matches.length > 1) throw new Error('Repository periods overlap.');
+  const repo = matches.length ? matches[0].repository : config.default_repository;
+  if (!/^ShreyPatel-1008\/[\w.-]+$/i.test(repo)) throw new Error('Invalid repository in rotation.');
+  return repo;
+}
+const owner = 'ShreyPatel-1008';
+const control = owner + '/Github-Automation';
+const zone = 'Asia/Kolkata';
+const el = id => document.getElementById(id);
+const dateKey = date => new Intl.DateTimeFormat('sv-SE',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).format(date);
+let displayedDay;
+function link(label, url) {
+  const a = document.createElement('a');
+  a.textContent = label;
+  a.href = url;
+  return a;
+}
+async function get(path, raw = false) {
+  const response = await fetch('https://api.github.com/' + path, {
+    headers: {Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json'},
+    cache: 'no-store'
+  });
+  if (!response.ok) throw new Error('GitHub returned HTTP ' + response.status + '.');
+  return response.json();
+}
+async function refresh() {
+  if (el('refresh').disabled) return;
+  el('refresh').disabled = true;
+  const now = new Date();
+  const day = dateKey(now);
+  displayedDay = day;
+  el('date').textContent = now.toLocaleDateString('en-IN',{timeZone:zone,dateStyle:'full'});
+  const hours = dailyHours(day);
+  el('hours').replaceChildren(...hours.map(hour => {
+    const chip = document.createElement('span');
+    chip.className = 'hour';
+    chip.textContent = String(hour).padStart(2,'0') + ':00';
+    return chip;
+  }));
+  el('repo').textContent = 'Loading rotation…';
+  el('prs').textContent = 'Checking GitHub…';
+  el('stamp').textContent = '';
+  try {
+    const config = await get('repos/' + control + '/contents/rotation.json', true);
+    const repo = target(config, day);
+    el('repo').replaceChildren(link(repo,'https://github.com/' + repo));
+  } catch (error) {
+    el('repo').textContent = 'Rotation unavailable. ' + error.message;
+  }
+  try {
+    const branches = hours.map(h => 'automation/' + day + '-' + String(h).padStart(2,'0'));
+    const query = 'user:' + owner + ' is:pr head:automation/' + day;
+    const data = await get('search/issues?per_page=100&q=' + encodeURIComponent(query));
+    if (data.incomplete_results || data.total_count > data.items.length) throw new Error('GitHub returned partial results.');
+    const rows = [];
+    for (const item of data.items) {
+      const repo = item.repository_url.split('/').slice(-2).join('/');
+      if (repo.split('/')[0].toLowerCase() !== owner.toLowerCase()) continue;
+      const pr = await get('repos/' + repo + '/pulls/' + item.number);
+      if (!branches.includes(pr.head.ref) || pr.head.repo?.full_name.toLowerCase() !== repo.toLowerCase()) continue;
+      const row = document.createElement('p');
+      row.append(link('#' + pr.number + ' ' + pr.title,pr.html_url),document.createElement('br'));
+      const meta = document.createElement('small');
+      meta.textContent = repo + ' · ' + pr.head.ref.slice(-2) + ':00 IST · ' + (pr.merged_at ? 'Merged' : pr.state);
+      row.append(meta); rows.push(row);
+    }
+    if (rows.length) el('prs').replaceChildren(...rows);
+    else el('prs').textContent = 'No pull requests found for today’s selected hours.';
+  } catch (error) {
+    el('prs').textContent = 'Pull requests unavailable. ' + error.message;
+  } finally {
+    el('stamp').textContent = 'Last checked at ' + new Date().toLocaleTimeString('en-IN',{timeZone:zone}) + ' IST · Public GitHub data';
+    el('refresh').disabled = false;
+  }
+}
+el('refresh').addEventListener('click', refresh);
+setInterval(() => { if (dateKey(new Date()) !== displayedDay) refresh(); }, 15000);
+refresh();
+</script></html>
